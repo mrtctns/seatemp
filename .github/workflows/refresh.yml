@@ -1,0 +1,53 @@
+name: Refresh feed
+
+# Twice a day. The satellite analysis publishes once daily, so one run would be
+# enough on a good day — the second is there because NOAA CoastWatch returns
+# 502s and 503s in spells, and a single missed run would leave every phone on
+# yesterday's number with no way to recover until tomorrow.
+on:
+  schedule:
+    - cron: "20 5 * * *"
+    - cron: "20 17 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # A slow run must never overlap the next one and race it to the same files.
+  group: refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild the feed
+        run: python3 tools/update_feed.py
+
+      - name: Check the run produced something
+        # update_feed.py leaves the previous files in place when a region fails,
+        # so an empty or missing v1/ means the job broke rather than that the sea
+        # has no temperature today. Fail loudly instead of committing nothing.
+        run: |
+          count=$(ls v1/*.json 2>/dev/null | wc -l)
+          echo "$count country files"
+          test "$count" -gt 0
+
+      - name: Commit
+        run: |
+          git config user.name "seatemp bot"
+          git config user.email "actions@github.com"
+          git add v1
+          # Nothing to commit is a normal outcome: if every reading is unchanged
+          # the files are byte-identical. Only the timestamp moves, so this
+          # mostly does commit — but an empty commit must not fail the run.
+          git diff --staged --quiet || git commit -m "feed: $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push
