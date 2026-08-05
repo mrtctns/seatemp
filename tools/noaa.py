@@ -26,6 +26,7 @@ import json
 import math
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE = "https://coastwatch.noaa.gov/erddap/griddap"
 DATASET = "noaacwBLENDEDsstDNDaily"   # Geo-polar Blended, day+night, L4, ~0.05°
@@ -33,12 +34,17 @@ VARIABLE = "analysed_sst"
 ATTRIBUTION = "NOAA CoastWatch · NASA JPL"
 
 
-def fetch_grid(south, north, west, east, when="last", tries=6, timeout=240):
+def fetch_grid(south, north, west, east, when="last", tries=6, timeout=240,
+               keep_time=False):
     """One bounding box of sea-surface temperature.
 
     Returns [(lat, lon, celsius)] for cells that carry a value; land and
     missing cells are dropped. Raises if every attempt fails — the caller
     decides whether a missing region is fatal.
+
+    With `keep_time` each row becomes (stamp, lat, lon, celsius) instead. Only
+    range requests need it — a single-day request has one stamp for the whole
+    grid, which is returned separately.
     """
     t = "(last)" if when == "last" else f"({when})"
     url = (f"{BASE}/{DATASET}.json"
@@ -70,7 +76,8 @@ def fetch_grid(south, north, west, east, when="last", tries=6, timeout=240):
                 if row[3] is None:
                     continue
                 stamp = stamp or row[0]
-                cells.append((row[1], row[2], to_c(row[3])))
+                cells.append((row[0], row[1], row[2], to_c(row[3])) if keep_time
+                             else (row[1], row[2], to_c(row[3])))
             # An empty result is a legitimate answer, not a failure: a box that
             # is entirely land has no sea cells in it. Treating it as an error
             # meant every inland block over the United States burned the full
@@ -136,6 +143,101 @@ def fetch_grid_chunked(south, north, west, east, **kw):
     if failed:
         print(f"    {total} blogun {failed} tanesi alinamadi", flush=True)
     return cells, stamp
+
+
+# A range request returns one grid per day, so the same box that is comfortable
+# for a single day is seven times too big for a week and comes back as a 502.
+# Three degrees square over a week is about the same number of cells as eight
+# degrees square over a day, which is the size already known to work.
+MAX_RANGE_SPAN_DEG = 3.0
+
+
+def fetch_range(south, north, west, east, start, stop, **kw):
+    """Every daily grid between two dates, as {"YYYY-MM-DD": [(lat, lon, c)]}.
+
+    ERDDAP serves a time range in a single request — `[(start):(stop)]` — which
+    is the difference between one call per region and seven. Days the dataset
+    has not published yet are simply absent from the result rather than an
+    error, so asking for a window that runs up to today is safe.
+    """
+    cells, _ = fetch_grid(south, north, west, east,
+                          when=f"{start}):({stop}", keep_time=True, **kw)
+    by_day = {}
+    for stamp, lat, lon, c in cells:
+        by_day.setdefault(stamp[:10], []).append((lat, lon, c))
+    return by_day
+
+
+def fetch_range_chunked(south, north, west, east, start, stop,
+                        points=None, **kw):
+    """fetch_range, split into blocks the endpoint will serve.
+
+    `points` is the (lat, lon) list the caller actually needs answers for.
+    Blocks holding none of them are never requested — the North America box is
+    36 by 72 degrees, which is 288 blocks, and all but a handful are inland.
+    Fetching them all took hours to download grids of Nebraska that no beach
+    would ever be matched against.
+
+    A block that fails is skipped, exactly as in fetch_grid_chunked: losing one
+    block loses the beaches in it for those days, which the history view shows
+    as a gap rather than inventing a number.
+    """
+    # Beaches are already pinned to a sea cell, but `nearest` still searches
+    # outwards from it, so a point just outside a block can legitimately match
+    # a cell inside it. A fifth of a degree is comfortably past the 12 km that
+    # search is allowed to travel.
+    margin = 0.2
+    buckets = set()
+    for lat0, lon0 in (points or ()):
+        buckets.add((int((lat0 - margin - south) // MAX_RANGE_SPAN_DEG),
+                     int((lon0 - margin - west) // MAX_RANGE_SPAN_DEG)))
+        buckets.add((int((lat0 + margin - south) // MAX_RANGE_SPAN_DEG),
+                     int((lon0 + margin - west) // MAX_RANGE_SPAN_DEG)))
+
+    # Enumerate first, fetch second, so the work can be handed to a pool.
+    blocks, skipped = [], 0
+    lat, i = south, 0
+    while lat < north:
+        lat_hi = min(lat + MAX_RANGE_SPAN_DEG, north)
+        lon, j = west, 0
+        while lon < east:
+            lon_hi = min(lon + MAX_RANGE_SPAN_DEG, east)
+            if points is not None and (i, j) not in buckets:
+                skipped += 1
+            else:
+                blocks.append((lat, lat_hi, lon, lon_hi))
+            lon, j = lon_hi, j + 1
+        lat, i = lat_hi, i + 1
+
+    # Three at a time. A week-wide block takes tens of seconds against this
+    # endpoint even when it is healthy, and fetching them one after another put
+    # the full rebuild at about five hours — almost all of it waiting on a
+    # socket. Three is deliberately modest: ERDDAP is a free research service
+    # that starts returning 503s when leaned on, and the retry ladder inside
+    # fetch_grid is what a heavier pool would spend its gains on.
+    merged, failed = {}, 0
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = {pool.submit(fetch_range, *b, start, stop, **kw): b
+                   for b in blocks}
+        for future in as_completed(futures):
+            block = futures[future]
+            try:
+                part = future.result()
+            except Exception as exc:                 # noqa: BLE001
+                failed += 1
+                print(f"    blok {block[0]:.0f},{block[2]:.0f} alinamadi "
+                      f"({str(exc)[:40]})", flush=True)
+                continue
+            for day, rows in part.items():
+                merged.setdefault(day, []).extend(rows)
+    total = len(blocks)
+    if total and failed == total:
+        raise RuntimeError(f"butun bloklar basarisiz ({total} blok)")
+    if failed:
+        print(f"    {total} blogun {failed} tanesi alinamadi", flush=True)
+    if skipped:
+        print(f"    {skipped} bos blok atlandi, {total} blok cekildi", flush=True)
+    return merged
 
 
 def km_between(lat1, lon1, lat2, lon2):

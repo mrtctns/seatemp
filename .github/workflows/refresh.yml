@@ -21,7 +21,11 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Roomier than the daily feed alone needs. The history step usually adds one
+    # day's grids, but after a night of 502s it catches up on several at once,
+    # and the endpoint has slow spells where a block takes the best part of a
+    # minute.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -31,6 +35,23 @@ jobs:
 
       - name: Rebuild the feed
         run: python3 tools/update_feed.py
+
+      # Only on the morning run. The history window moves once a day, so the
+      # evening pass would redo an hour of work to produce the same seven days;
+      # the daily feed still refreshes twice, because that is the number people
+      # actually open the app for.
+      #
+      # Failure here is not failure of the run. The history card is a premium
+      # extra and it falls back to the copy already published; the temperature
+      # every user opens the app for has already been written by the step above
+      # and must still be committed.
+      - name: Roll the history feed forward
+        if: github.event.schedule != '20 17 * * *'
+        continue-on-error: true
+        # No --full. That refetches both seven-day windows and takes hours; this
+        # fetches only the days the published files are missing, which is one on
+        # a normal morning and however many are outstanding after a bad night.
+        run: python3 tools/build_history.py
 
       - name: Check the run produced something
         # update_feed.py leaves the previous files in place when a region fails,

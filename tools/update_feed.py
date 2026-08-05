@@ -23,8 +23,8 @@ sys.path.insert(0, HERE)
 from noaa import ATTRIBUTION, SeaGrid, fetch_grid  # noqa: E402
 
 ROOT = os.path.join(HERE, "..")
-CATALOGUE = os.path.join(ROOT, "beaches.json")
-FEED = os.path.join(ROOT, "v1")
+CATALOGUE = os.path.join(ROOT, "SeaTemp", "beaches.json")
+FEED = os.path.join(ROOT, "feed", "v1")
 
 # Same regions as the database build, so a beach is read from the same water it
 # was pinned to. Generous boxes: a coastline clipped at the edge loses beaches
