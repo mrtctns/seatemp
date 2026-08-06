@@ -32,9 +32,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 from noaa import ATTRIBUTION, SeaGrid, fetch_range_chunked  # noqa: E402
 from update_feed import CATALOGUE, MAX_DRIFT_KM, REGIONS  # noqa: E402
+from update_feed import FEED as DAILY_FEED  # noqa: E402
 
-ROOT = os.path.join(HERE, "..")
-FEED = os.path.join(ROOT, "feed", "v1", "h")
+# Beside the daily feed, whichever layout that resolved to. Deriving it rather
+# than rebuilding the path is what keeps the two in step when the tools run
+# from the published feed repository instead of the app one.
+FEED = os.path.join(DAILY_FEED, "h")
 
 DAYS = 7
 

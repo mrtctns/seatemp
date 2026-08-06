@@ -23,8 +23,28 @@ sys.path.insert(0, HERE)
 from noaa import ATTRIBUTION, SeaGrid, fetch_grid  # noqa: E402
 
 ROOT = os.path.join(HERE, "..")
-CATALOGUE = os.path.join(ROOT, "SeaTemp", "beaches.json")
-FEED = os.path.join(ROOT, "feed", "v1")
+
+
+def _here_or_there(*candidates):
+    """The first path that exists, or the first one if none does.
+
+    These tools run from two layouts. In the app repository the catalogue sits
+    under SeaTemp/ and the output under feed/v1; in the published feed
+    repository both are at the root. Hard-coding the app's layout is what broke
+    the live refresh job — update_feed.py died on a missing beaches.json seven
+    seconds into every run, and the only visible symptom was "All jobs have
+    failed" in an email.
+    """
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return candidates[0]
+
+
+CATALOGUE = _here_or_there(os.path.join(ROOT, "SeaTemp", "beaches.json"),
+                           os.path.join(ROOT, "beaches.json"))
+FEED = _here_or_there(os.path.join(ROOT, "feed", "v1"),
+                      os.path.join(ROOT, "v1"))
 
 # Same regions as the database build, so a beach is read from the same water it
 # was pinned to. Generous boxes: a coastline clipped at the edge loses beaches
